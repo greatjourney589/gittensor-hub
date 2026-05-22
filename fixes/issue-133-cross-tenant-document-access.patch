@@ -15,7 +15,7 @@ diff --git a/api/apps/sdk/doc.py b/api/apps/sdk/doc.py
      if not document_id:
          return get_error_data_result(message="Specify document_id please.")
 +    if not DocumentService.accessible(document_id, current_user.id):
-+        return get_error_data_result(message=f"You don't own the document {document_id}.")
++        return get_error_data_result(message="Document not found!")
      doc = DocumentService.query(id=document_id)
      if not doc:
          return get_error_data_result(message=f"The dataset not own the document {document_id}.")
