@@ -365,7 +365,7 @@ async function refreshLiveIfStale(): Promise<void> {
       tx();
       lastFetchedAt = Date.now();
       console.log(
-        `[repos] live sync: ${liveByLc.size} upstream | ${added} added, ${updated} re-weighted/configured, ${zeroed} zeroed`,
+        `[repos] live sync: ${liveByLc.size} upstream${skipped > 0 ? `, ${skipped} skipped` : ''} | ${added} added, ${updated} re-weighted/configured, ${zeroed} zeroed`,
       );
     } catch (err) {
       const msg = err instanceof Error ? err.message : String(err);
