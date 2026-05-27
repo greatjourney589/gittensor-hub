@@ -20,10 +20,9 @@ import {
 
 // Live source. We poll entrius/gittensor:main/master_repositories.json every
 // 5 minutes. Per-poll semantics:
-//   * Repos present in upstream  -> weight/config set to live values.
-//   * Repos previously seen but absent upstream -> weight set to 0.
+//   * Repos present in upstream -> weight/config set to live values.
+//   * Repos absent upstream -> removed from repo_weights and issue/PR cache.
 //   * Repos new to upstream -> row inserted with live weight/config.
-//   * Nothing is ever deleted.
 const REMOTE_URL =
   'https://raw.githubusercontent.com/entrius/gittensor/main/gittensor/validator/weights/master_repositories.json';
 const REFRESH_MS = 5 * 60 * 1000;
@@ -260,6 +259,28 @@ const MIN_LIVE_RETAIN_FRACTION = 0.5;
 
 function isPlainObject(value: unknown): value is Record<string, unknown> {
   return typeof value === 'object' && value !== null && !Array.isArray(value);
+function deleteRowsOutsideLive(
+  db: ReturnType<typeof getDb>,
+  table: string,
+  column: string,
+  liveKeys: string[],
+): number {
+  if (liveKeys.length === 0) return 0;
+  const placeholders = liveKeys.map(() => '?').join(',');
+  return db.prepare(`DELETE FROM ${table} WHERE LOWER(${column}) NOT IN (${placeholders})`).run(...liveKeys).changes;
+}
+
+function pruneCachedDataToLiveRepos(db: ReturnType<typeof getDb>, liveKeys: string[]): number {
+  if (liveKeys.length === 0) return 0;
+  let removed = 0;
+  removed += deleteRowsOutsideLive(db, 'pr_issue_links', 'repo_full_name', liveKeys);
+  removed += deleteRowsOutsideLive(db, 'issue_comments', 'repo_full_name', liveKeys);
+  removed += deleteRowsOutsideLive(db, 'issue_validations', 'repo_full_name', liveKeys);
+  removed += deleteRowsOutsideLive(db, 'repo_badges', 'full_name', liveKeys);
+  removed += deleteRowsOutsideLive(db, 'repo_meta', 'full_name', liveKeys);
+  removed += deleteRowsOutsideLive(db, 'issues', 'repo_full_name', liveKeys);
+  removed += deleteRowsOutsideLive(db, 'pulls', 'repo_full_name', liveKeys);
+  return removed;
 }
 
 async function refreshLiveIfStale(): Promise<void> {
@@ -337,10 +358,13 @@ async function refreshLiveIfStale(): Promise<void> {
            updated_at = excluded.updated_at,
            config_json = excluded.config_json`,
       );
+      const deleteWeight = db.prepare('DELETE FROM repo_weights WHERE full_name = ?');
       const now = new Date().toISOString();
-      let zeroed = 0;
+      let removedRepos = 0;
       let updated = 0;
       let added = 0;
+      let prunedCacheRows = 0;
+      const liveKeys = Array.from(liveByLc.keys());
       const tx = db.transaction(() => {
         for (const e of existing) {
           const key = e.full_name.toLowerCase();
@@ -351,9 +375,8 @@ async function refreshLiveIfStale(): Promise<void> {
               upsert.run(e.full_name, live.weight, now, liveConfigJson);
               updated += 1;
             }
-          } else if (e.weight !== 0) {
-            upsert.run(e.full_name, 0, now, e.config_json);
-            zeroed += 1;
+          } else {
+            removedRepos += deleteWeight.run(e.full_name).changes;
           }
         }
         for (const [key, live] of liveByLc.entries()) {
@@ -361,11 +384,13 @@ async function refreshLiveIfStale(): Promise<void> {
           upsert.run(live.fullName, live.weight, now, liveConfigJsonByLc.get(key) ?? null);
           added += 1;
         }
+        prunedCacheRows = pruneCachedDataToLiveRepos(db, liveKeys);
       });
       tx();
       lastFetchedAt = Date.now();
       console.log(
         `[repos] live sync: ${liveByLc.size} upstream${skipped > 0 ? `, ${skipped} skipped` : ''} | ${added} added, ${updated} re-weighted/configured, ${zeroed} zeroed`,
+        `[repos] live sync: ${liveByLc.size} upstream | ${added} added, ${updated} re-weighted/configured, ${removedRepos} removed, ${prunedCacheRows} stale cache rows pruned`,
       );
     } catch (err) {
       const msg = err instanceof Error ? err.message : String(err);
@@ -379,13 +404,11 @@ async function refreshLiveIfStale(): Promise<void> {
 }
 
 function readAll(): Sn74Repo[] {
+  if (lastFetchedAt === 0) return [];
   try {
     const rows = getDb()
       .prepare('SELECT full_name, weight, config_json FROM repo_weights')
       .all() as Array<{ full_name: string; weight: number; config_json: string | null }>;
-    if (lastFetchedAt === 0) {
-      return rows.map((r) => storedRepoEntry(r.full_name, r.weight, r.config_json));
-    }
     return rows
       .filter((r) => liveByLc.has(r.full_name.toLowerCase()))
       .map((r) => liveByLc.get(r.full_name.toLowerCase()) ?? storedRepoEntry(r.full_name, r.weight, r.config_json));
@@ -419,19 +442,9 @@ export async function getLiveReposAsyncServer(): Promise<{
 export async function isTrackedRepoServer(fullName: string): Promise<boolean> {
   await refreshLiveIfStale();
   const key = fullName.toLowerCase();
-  // Warm path: the live in-memory snapshot is authoritative, so an O(1) map
-  // lookup avoids the per-request `repo_weights` SELECT+sort that buildList()
-  // runs. This is the access-control hot path — every gated route hits it.
-  if (lastFetchedAt > 0) return liveByLc.has(key);
-  // Cold start (no successful live fetch yet): fall back to the DB floor,
-  // mirroring readAll()'s cold-path membership.
-  try {
-    return !!getDb()
-      .prepare('SELECT 1 FROM repo_weights WHERE LOWER(full_name) = ? LIMIT 1')
-      .get(key);
-  } catch {
-    return false;
-  }
+  // The live in-memory snapshot is authoritative. Before the first successful
+  // live fetch in this process, return false rather than trusting stale DB rows.
+  return lastFetchedAt > 0 && liveByLc.has(key);
 }
 
 export async function getIssueDiscoveryDisabledReposAsyncServer(repoFullNames: Iterable<string>): Promise<Set<string>> {
