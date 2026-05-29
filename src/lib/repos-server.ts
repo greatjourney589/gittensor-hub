@@ -259,6 +259,8 @@ const MIN_LIVE_RETAIN_FRACTION = 0.5;
 
 function isPlainObject(value: unknown): value is Record<string, unknown> {
   return typeof value === 'object' && value !== null && !Array.isArray(value);
+}
+
 function deleteRowsOutsideLive(
   db: ReturnType<typeof getDb>,
   table: string,
@@ -389,7 +391,6 @@ async function refreshLiveIfStale(): Promise<void> {
       tx();
       lastFetchedAt = Date.now();
       console.log(
-        `[repos] live sync: ${liveByLc.size} upstream${skipped > 0 ? `, ${skipped} skipped` : ''} | ${added} added, ${updated} re-weighted/configured, ${zeroed} zeroed`,
         `[repos] live sync: ${liveByLc.size} upstream | ${added} added, ${updated} re-weighted/configured, ${removedRepos} removed, ${prunedCacheRows} stale cache rows pruned`,
       );
     } catch (err) {
