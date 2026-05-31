@@ -299,14 +299,29 @@ export function promoteUser(id: number, byId: number): UserRow {
 /**
  * Revoke the admin role. Idempotent. Refuses to demote the caller themselves
  * or the last remaining admin.
+ *
+ * The entire read-check-write runs inside a db.transaction() to prevent the
+ * TOCTOU race where two concurrent demotions both observe adminCount > 1 and
+ * both commit, leaving zero admins. All guard-then-update paths on `users`
+ * must follow this pattern.
  */
 export function demoteUser(id: number, byId: number): UserRow {
-  const target = getUserById(id);
-  if (!target) throw new RoleError('not_found', 'User not found');
+  // Self-demote check is argument-only; no DB read needed, so guard it early.
   if (id === byId) throw new RoleError('self_demote', 'You cannot demote yourself');
-  if (!target.is_admin) return target;
-  if (countAdmins() <= 1) throw new RoleError('last_admin', 'Cannot demote the last admin');
   const db = getDb();
-  db.prepare('UPDATE users SET is_admin = 0 WHERE id = ?').run(id);
-  return getUserById(id)!;
+  return db.transaction((): UserRow => {
+    const target = db
+      .prepare('SELECT * FROM users WHERE id = ?')
+      .get(id) as UserRow | undefined;
+    if (!target) throw new RoleError('not_found', 'User not found');
+    if (!target.is_admin) return target;
+
+    const { c } = db
+      .prepare('SELECT COUNT(*) c FROM users WHERE is_admin = 1')
+      .get() as { c: number };
+    if (c <= 1) throw new RoleError('last_admin', 'Cannot demote the last admin');
+
+    db.prepare('UPDATE users SET is_admin = 0 WHERE id = ?').run(id);
+    return db.prepare('SELECT * FROM users WHERE id = ?').get(id) as UserRow;
+  })();
 }
