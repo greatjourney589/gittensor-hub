@@ -63,7 +63,6 @@ export async function setSessionCookieFor(user: UserRow): Promise<void> {
     uid: user.id,
     username: user.github_login,
     status: user.status,
-    is_admin: !!user.is_admin,
     avatar_url: user.avatar_url,
     exp,
   });

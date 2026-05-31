@@ -13,7 +13,6 @@ export interface SessionPayload {
   // existing useSession() hook and consumers that read session.username.
   username: string;
   status: SessionStatus;
-  is_admin: boolean;
   avatar_url?: string | null;
   exp: number;
 }

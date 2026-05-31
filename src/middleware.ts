@@ -31,24 +31,28 @@ export async function middleware(req: NextRequest) {
     return NextResponse.redirect(url);
   }
 
-  // Admin-only routes (page + API)
-  const isAdminRoute = pathname.startsWith('/admin') || pathname.startsWith('/api/admin');
-  if (isAdminRoute && !session.is_admin) {
+  // Re-fetch the user row before any authorization decision so that role and
+  // status changes take effect on the very next request, not at cookie expiry.
+  const user = getUserById(session.uid);
+
+  // User row deleted after the session was issued — treat as unauthenticated.
+  if (!user) {
     if (pathname.startsWith('/api/')) {
-      return NextResponse.json({ error: 'Forbidden' }, { status: 403 });
+      const res = NextResponse.json({ error: 'Not authenticated', authenticated: false }, { status: 401 });
+      res.cookies.delete(SESSION_COOKIE_NAME);
+      return res;
     }
     const url = req.nextUrl.clone();
-    url.pathname = '/';
-    return NextResponse.redirect(url);
+    url.pathname = '/sign-in';
+    url.search = '';
+    const res = NextResponse.redirect(url);
+    res.cookies.delete(SESSION_COOKIE_NAME);
+    return res;
   }
-
-  // Refresh status from DB — cookie value is frozen at login and may be stale
-  const user = getUserById(session.uid);
-  const liveStatus = user?.status ?? 'rejected';
 
   // Rejected users are admin-banned: clear their session and bounce to sign-in
   // with an error so they can't silently retry.
-  if (liveStatus === 'rejected') {
+  if (user.status === 'rejected') {
     if (pathname.startsWith('/api/')) {
       return NextResponse.json({ error: 'Account suspended' }, { status: 403 });
     }
@@ -59,6 +63,17 @@ export async function middleware(req: NextRequest) {
     const res = NextResponse.redirect(url);
     res.cookies.delete(SESSION_COOKIE_NAME);
     return res;
+  }
+
+  // Admin-only routes: use the live DB value, never the stale cookie field.
+  const isAdminRoute = pathname.startsWith('/admin') || pathname.startsWith('/api/admin');
+  if (isAdminRoute && !user.is_admin) {
+    if (pathname.startsWith('/api/')) {
+      return NextResponse.json({ error: 'Forbidden' }, { status: 403 });
+    }
+    const url = req.nextUrl.clone();
+    url.pathname = '/';
+    return NextResponse.redirect(url);
   }
 
   return NextResponse.next();
